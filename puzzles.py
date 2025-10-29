@@ -194,6 +194,24 @@ def run_demo4():
     print_end_line()
 
 
+# my utils func
+@triton.jit
+def get_1d_offset(pid, bs):
+    return pid * bs + tl.arange(0, bs)
+
+@triton.jit
+def get_2d_offset(offset_m, offset_n, stride_m, stride_n):
+    return tl.expand_dims(offset_m, 1) * stride_m + tl.expand_dims(offset_n, 0) * stride_n
+
+@triton.jit
+def get_1d_mask(offs, max):
+    return offs < max
+
+@triton.jit
+def get_2d_mask(offs_m, offs_n, max_m, max_n):
+    return (tl.expand_dims(offs_m, 1) < max_m) & (tl.expand_dims(offs_n, 0) < max_n)
+
+
 r"""
 ## Puzzle 1: Constant Add
 
@@ -216,6 +234,8 @@ def add_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     off_x = tl.arange(0, B0)
     x = tl.load(x_ptr + off_x)
     # Finish me!
+    x += 10
+    tl.store(z_ptr + off_x, x)
     return
 
 
@@ -237,7 +257,12 @@ def add2_spec(x: Float32[200,]) -> Float32[200,]:
 @triton.jit
 def add_mask2_kernel(x_ptr, z_ptr, N0, B0: tl.constexpr):
     # Finish me!
-    return
+    pid = tl.program_id(0)
+    offset = pid * B0 + tl.arange(0, B0)
+    mask = offset < N0
+    x = tl.load(x_ptr + offset, mask=mask)
+    x += 10
+    tl.store(z_ptr + offset, x, mask)
 
 
 r"""
@@ -260,7 +285,12 @@ def add_vec_spec(x: Float32[32,], y: Float32[32,]) -> Float32[32, 32]:
 @triton.jit
 def add_vec_kernel(x_ptr, y_ptr, z_ptr, N0, N1, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
-    return
+    # pid_0, pid_1 = tl.program_id(0), tl.program_id(1)
+    offset_0, offset_1 = tl.arange(0, B0), tl.arange(0, B1)
+    offset = offset_1.expand_dims(1) * B0 + offset_0.expand_dims(0)
+    x, y = tl.load(x_ptr + offset_0), tl.load(y_ptr + offset_1)
+    z = x.expand_dims(0) + y.expand_dims(1)
+    tl.store(z_ptr + offset, z)
 
 
 r"""
@@ -287,6 +317,18 @@ def add_vec_block_kernel(
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
     # Finish me!
+    offset_0 = block_id_x * B0 + tl.arange(0, B0)
+    offset_1 = block_id_y * B1 + tl.arange(0, B1)
+    offset = offset_1.expand_dims(1) * N0 + offset_0.expand_dims(0)
+    # if block_id_x == 1 and block_id_y == 0:
+    #     print(offset)
+    mask_0 = offset_0 < N0
+    mask_1 = offset_1 < N1
+    mask = tl.expand_dims(mask_1, 1) & tl.expand_dims(mask_0, 0)
+    x = tl.load(x_ptr + offset_0, mask_0)
+    y = tl.load(y_ptr + offset_1, mask_1)
+    z = y.expand_dims(1) + x.expand_dims(0)
+    tl.store(z_ptr + offset, z, mask=mask)
     return
 
 
@@ -314,6 +356,18 @@ def mul_relu_block_kernel(
     block_id_x = tl.program_id(0)
     block_id_y = tl.program_id(1)
     # Finish me!
+    offset_0 = block_id_x * B0 + tl.arange(0, B0)
+    offset_1 = block_id_y * B1 + tl.arange(0, B1)
+    offset = offset_1.expand_dims(1) * N0 + offset_0.expand_dims(0) * 1
+    mask_0 = offset_0 < N0
+    mask_1 = offset_1 < N1
+    mask = tl.expand_dims(mask_1, 1) & tl.expand_dims(mask_0, 0)
+    
+    x = tl.load(x_ptr + offset_0, mask_0)
+    y = tl.load(y_ptr + offset_1, mask_1)
+    z = y.expand_dims(1) * x.expand_dims(0)
+    z = tl.maximum(z, 0)
+    tl.store(z_ptr + offset, z, mask=mask)
     return
 
 
@@ -354,6 +408,18 @@ def mul_relu_block_back_kernel(
     block_id_i = tl.program_id(0)
     block_id_j = tl.program_id(1)
     # Finish me!
+    offset_i = block_id_i * B0 + tl.arange(0, B0)
+    offset_j = block_id_j * B1 + tl.arange(0, B1)
+    offset_x = offset_j.expand_dims(1) * N0 + offset_i.expand_dims(0)
+    mask_x = (offset_j.expand_dims(1) < N1) & (offset_i.expand_dims(0) < N0)
+    mask_y = offset_j < N1
+    x = tl.load(x_ptr + offset_x, mask=mask_x)
+    y = tl.load(y_ptr + offset_j, mask=mask_y)
+    x_y = x * y.expand_dims(1)
+    d_relu = tl.where(x_y > 0, 1, 0)
+    dz = tl.load(dz_ptr + offset_x, mask=mask_x)
+    df = d_relu * y.expand_dims(1) * dz
+    tl.store(dx_ptr + offset_x, df, mask=mask_x)
     return
 
 
@@ -379,6 +445,18 @@ def sum_spec(x: Float32[4, 200]) -> Float32[4,]:
 @triton.jit
 def sum_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     # Finish me!
+    pid = tl.program_id(0)
+    offset_0 = pid * B0 + tl.arange(0, B0)
+    offset_1 = tl.arange(0, B1)
+    acc = tl.zeros((B0,), dtype=tl.float32)
+    for _ in range(0, T, B1):
+        offset_x = offset_0.expand_dims(1) * T + offset_1.expand_dims(0)
+        mask_x = (offset_0 < N0).expand_dims(1) & (offset_1 < T).expand_dims(0)
+        x = tl.load(x_ptr + offset_x, mask=mask_x)
+        acc += tl.sum(x, axis=1)
+        offset_1 += B1
+    mask_z = offset_0 < N0
+    tl.store(z_ptr + offset_0, acc, mask=mask_z)
     return
 
 
@@ -420,6 +498,31 @@ def softmax_kernel(x_ptr, z_ptr, N0, N1, T, B0: tl.constexpr, B1: tl.constexpr):
     block_id_i = tl.program_id(0)
     log2_e = 1.44269504
     # Finish me!
+    offset_0 = block_id_i * B0 + tl.arange(0, B0)
+    offset_1 = tl.arange(0, B1)
+    exp_sum = tl.zeros((B0,), tl.float32)
+    x_max = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    new_x_max = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    
+    for idx in range(0, T, B1):
+        offset_x_b1 = idx + offset_1
+        offset_x = offset_0.expand_dims(1) * T + offset_x_b1
+        mask_x = (offset_0 < N0).expand_dims(1) & (offset_x_b1 < T).expand_dims(0)
+        x = tl.load(x_ptr + offset_x, mask=mask_x)
+        new_x_max = tl.maximum(x_max, tl.max(x, axis=1))
+        exp_x = tl.exp2(log2_e * (x - new_x_max.expand_dims(1)))
+        exp_sum = tl.sum(exp_x, 1) + exp_sum * tl.exp2(log2_e*x_max) / tl.exp2(log2_e*new_x_max)
+        x_max = new_x_max
+
+    for idx in range(0, T, B1):
+        offset_x_b1 = idx + offset_1
+        offset_x = offset_0.expand_dims(1) * T + offset_x_b1
+        mask_x = (offset_0 < N0).expand_dims(1) & (offset_x_b1 < T).expand_dims(0)
+        x = tl.load(x_ptr + offset_x, mask=mask_x)
+        exp_x = tl.exp2(log2_e * (x - x_max.expand_dims(1)))
+        z = exp_x / (tl.expand_dims(exp_sum, 1))
+        tl.store(z_ptr + offset_x, z, mask=mask_x)
+    
     return
 
 
@@ -816,3 +919,4 @@ if __name__ == "__main__":
         run_puzzles(args, [int(args.puzzle)])
     else:
         parser.print_help()
+
