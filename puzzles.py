@@ -572,6 +572,42 @@ def flashatt_kernel(
     log2_e = 1.44269504
     myexp = lambda x: tl.exp2(log2_e * x)
     # Finish me!
+    offset_q = block_id_i * B0 + tl.arange(0, B0)
+    mask_q = offset_q < N0
+    q = tl.load(q_ptr + offset_q, mask=mask_q)
+    max_qk = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    new_max_qk = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    exp_sum_qk = tl.zeros((B0,), dtype=tl.float32)
+    offset_kv = tl.arange(0, B1)
+    for i in range(0, T, B1):
+        mask_kv = offset_kv < T
+        k = tl.load(k_ptr + offset_kv, mask=mask_kv)
+        qk = q.expand_dims(1) * k.expand_dims(0)
+        # Mask invalid positions to -inf
+        mask_qk = mask_q.expand_dims(1) & mask_kv.expand_dims(0)
+        qk = tl.where(mask_qk, qk, float('-inf'))
+        new_max_qk = tl.maximum(max_qk, qk.max(1))
+        new_exp_qk = myexp(qk - new_max_qk.expand_dims(1))
+        exp_sum_qk = exp_sum_qk * myexp(max_qk - new_max_qk) + new_exp_qk.sum(1)
+        max_qk = new_max_qk
+        offset_kv += B1
+
+    acc = tl.zeros((B0,), dtype=tl.float32)
+    offset_kv = tl.arange(0, B1)
+    for _ in range(0, T, B1):
+        mask_kv = offset_kv < T
+        k = tl.load(k_ptr + offset_kv, mask=mask_kv)
+        v = tl.load(v_ptr + offset_kv, mask=mask_kv)
+        qk = q.expand_dims(1) * k.expand_dims(0)
+        # Mask invalid positions to -inf
+        mask_qk = mask_q.expand_dims(1) & mask_kv.expand_dims(0)
+        qk = tl.where(mask_qk, qk, float('-inf'))
+        exp_qk = myexp(qk - max_qk.expand_dims(1))
+        soft = exp_qk / exp_sum_qk.expand_dims(1)
+        acc += (v.expand_dims(0) * soft).sum(1)
+        # acc += tl.dot(soft, v.expand_dims(1))
+        offset_kv += B1
+    tl.store(z_ptr + offset_q, acc, mask=mask_q)
     return
 
 
@@ -919,4 +955,5 @@ if __name__ == "__main__":
         run_puzzles(args, [int(args.puzzle)])
     else:
         parser.print_help()
+
 
