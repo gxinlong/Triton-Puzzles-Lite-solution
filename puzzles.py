@@ -576,6 +576,40 @@ def flashatt_kernel(
     mask_q = offset_q < N0
     q = tl.load(q_ptr + offset_q, mask=mask_q)
     max_qk = tl.full((B0,), -float('inf'), dtype=tl.float32)
+    exp_qk_max_sum = tl.zeros((B0,), dtype=tl.float32)
+    z = tl.zeros((B0,), dtype=tl.float32)
+
+    offset_kv = tl.arange(0, B1)
+    for _ in tl.range(0, T, B1):
+        mask_kv = offset_kv < T
+        k = tl.load(k_ptr + offset_kv, mask=mask_kv)
+        v = tl.load(v_ptr + offset_kv, mask=mask_kv)
+        mask_qk = mask_q.expand_dims(1) & mask_kv.expand_dims(0)
+        qk = q.expand_dims(1) * k.expand_dims(0) + tl.where(mask_qk, 0, -1.0e6)
+        new_max_qk = tl.maximum(max_qk, tl.max(qk, 1))
+        factor = myexp(max_qk - new_max_qk)
+        exp_qk = myexp(qk - new_max_qk.expand_dims(1))
+        exp_qk_max_sum = exp_qk_max_sum * factor + exp_qk.sum(1)       # 分母
+        exp_qkv_new_sum = tl.sum(v.expand_dims(0) * exp_qk, 1)
+        z = z * factor + exp_qkv_new_sum    # 分子
+        offset_kv += B1
+        max_qk = new_max_qk
+    z = z / exp_qk_max_sum
+    tl.store(z_ptr + offset_q, z, mask=mask_q)
+
+
+@triton.jit
+def flashatt_kernel_slow(
+    q_ptr, k_ptr, v_ptr, z_ptr, N0, T, B0: tl.constexpr, B1: tl.constexpr
+):
+    block_id_i = tl.program_id(0)
+    log2_e = 1.44269504
+    myexp = lambda x: tl.exp2(log2_e * x)
+    # Finish me!
+    offset_q = block_id_i * B0 + tl.arange(0, B0)
+    mask_q = offset_q < N0
+    q = tl.load(q_ptr + offset_q, mask=mask_q)
+    max_qk = tl.full((B0,), -float('inf'), dtype=tl.float32)
     new_max_qk = tl.full((B0,), -float('inf'), dtype=tl.float32)
     exp_sum_qk = tl.zeros((B0,), dtype=tl.float32)
     offset_kv = tl.arange(0, B1)
@@ -955,5 +989,6 @@ if __name__ == "__main__":
         run_puzzles(args, [int(args.puzzle)])
     else:
         parser.print_help()
+
 
 
