@@ -675,6 +675,28 @@ def conv2d_kernel(
 ):
     block_id_i = tl.program_id(0)
     # Finish me!
+    offset_i = block_id_i * B0 + tl.arange(0, B0)
+    mask_i = offset_i < N0
+    offset_kh = tl.arange(0, KH)
+    offset_kw = tl.arange(0, KW)
+    offset_k = offset_kh.expand_dims(1) * KW + offset_kw.expand_dims(0)
+    k = tl.load(k_ptr + offset_k, mask=None)
+    
+    print(B0, N0)
+    
+    for hidx in tl.range(0, H):
+        for widx in tl.range(0, W):
+            offset_h = tl.arange(0, KH) + hidx
+            offset_w = tl.arange(0, KW) + widx
+            mask_h = offset_h < H
+            mask_w = offset_w < W
+            offset_x = tl.expand_dims(offset_i, (1,2))*H*W + tl.expand_dims(offset_h, (0,2))*W + tl.expand_dims(offset_w, (0,1))
+            mask_x = tl.expand_dims(mask_i, (1,2)) & tl.expand_dims(mask_h, (0,2)) & tl.expand_dims(mask_w, (0,1))
+            x = tl.load(x_ptr + offset_x, mask=mask_x, other=0.0)
+            kx = x * k.expand_dims(0)
+            z = tl.sum(tl.sum(kx, 2), 1)
+            offset_z = offset_i * H * W + hidx * W + widx
+            tl.store(z_ptr + offset_z, z, mask=mask_i)
     return
 
 
@@ -989,6 +1011,7 @@ if __name__ == "__main__":
         run_puzzles(args, [int(args.puzzle)])
     else:
         parser.print_help()
+
 
 
 
